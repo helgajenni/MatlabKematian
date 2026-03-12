@@ -1,38 +1,37 @@
 %% ============================================================
 clear; clc; close all;
 
+%% ===================== SEED SETUP (UNTUK DATA TA) ===============
+seed_value = 50; 
+rng(seed_value);
+fprintf('=== Inisialisasi Simulasi dengan Seed: %d ===\n', seed_value);
+
 %% ===================== MAP & OBSTACLE SETUP =====================
 mapSize   = [33 50];
 xMax      = mapSize(2);
 yMax      = mapSize(1);
-
 obstacles = [10  10   0.25;
              20  20   0.25;
              30  10   0.25;
              40  20   0.25;
              17  16.5 0.25;
              41  16   0.25];
-
 start    = [1,  8];
 waypoint = [25, 20.0];
 goal     = [48, 13.0];
-
 safetyMargin  = 2.0;   % RRT* planning clearance [m]
 displayMargin = 0.5;   % visual ring only [m]
-
 %% =================== USV PHYSICAL PARAMETERS ====================
 USV.L   = 1.2;
 USV.B   = 0.4;
 USV.m   = 11.8;
 USV.U0  = 1.5;      % desired surge speed [m/s] — TETAP 1.5, tidak boleh diubah
-
 USV.mx  = 0.59;
 USV.my  = 4.72;
 USV.Iz  = 1.416;
 USV.Jz  = 0.142;
 USV.Ix  = 0.157;
 USV.Jx  = 0.016;
-
 USV.Xu  = -2.0;
 USV.Xuu = -1.5;
 USV.Yv  = -35.0;    % Yv=-20: R_turn=4.1m, beta=11.8deg
@@ -41,94 +40,98 @@ USV.Nr  = -4.0;
 USV.Nrr = -1.5;
 USV.Nv  = -0.5;
 USV.Yr  =  0.2;
-
 USV.Kp_roll = -1.5;
 USV.Kpp     = -0.3;
 USV.GMT     =  0.15;
 USV.Kv_roll =  0.1;
 USV.Kr_roll = -0.1;
-
 % T0 = |Xuu|*U0^2 + |Xu|*U0 = 1.5*2.25 + 2.0*1.5 = 6.375 N
 USV.T0 = 6.4;       % nominal thrust [N] — JANGAN PERNAH dikurangi
-
-USV.Kn_r = 2.5;
-USV.Ky_r = 0.30;
-
+USV.Kn_r = 3.0;
+USV.Ky_r = 0.5;
 USV.deltaMax  = deg2rad(35);
 USV.deltaRate = deg2rad(20);
-
 %% =================== RRT* PARAMETERS ============================
-rrt.maxIter   = 12000;
+rrt.maxIter   = 800;
 rrt.stepSize  = 1.0;
 rrt.goalBias  = 0.15;
 rrt.rewireRad = 3.0;
 rrt.goalTol   = 1.0;
-
 %% =================== RUN RRT* ===================================
 fprintf('=== RRT* Segment 1: Start -> Waypoint ===\n');
+
+tic; % <--- MULAI MENGHITUNG WAKTU SEGMEN 1
 rawPath1 = rrtStar(start, waypoint, obstacles, mapSize, rrt, safetyMargin);
+waktu_segmen1 = toc; % <--- BERHENTI MENGHITUNG
+
 if isempty(rawPath1), error('RRT* Seg1 failed'); end
-fprintf('  Raw path 1: %d pts\n', size(rawPath1,1));
+fprintf('  Raw path 1: %d pts | Waktu: %.3f detik\n', size(rawPath1,1), waktu_segmen1);
 
 fprintf('=== RRT* Segment 2: Waypoint -> Goal ===\n');
-rawPath2 = rrtStar(waypoint, goal, obstacles, mapSize, rrt, safetyMargin);
-if isempty(rawPath2), error('RRT* Seg2 failed'); end
-fprintf('  Raw path 2: %d pts\n', size(rawPath2,1));
 
+tic; % <--- MULAI MENGHITUNG WAKTU SEGMEN 2
+rawPath2 = rrtStar(waypoint, goal, obstacles, mapSize, rrt, safetyMargin);
+waktu_segmen2 = toc; % <--- BERHENTI MENGHITUNG
+
+if isempty(rawPath2), error('RRT* Seg2 failed'); end
+fprintf('  Raw path 2: %d pts | Waktu: %.3f detik\n', size(rawPath2,1), waktu_segmen2);
+
+% Menggabungkan path
 rawPathAll = [rawPath1; rawPath2(2:end,:)];
 
-%% =================== G2CBS SMOOTHING ============================
-fprintf('=== G2CBS Smoothing ===\n');
+% --- MENGHITUNG REKAPITULASI UNTUK DATA TA ---
+total_waktu_RRT = waktu_segmen1 + waktu_segmen2;
+total_panjang_raw = sum(sqrt(sum(diff(rawPathAll).^2,2)));
+total_waypoint_raw = size(rawPathAll,1);
 
-% Smooth per-segmen: kapal WAJIB melalui waypoint
-smoothPath1 = g2cbsSmooth(rawPath1, 100);
-smoothPath1 = repairPathObstacles(smoothPath1, obstacles, safetyMargin);
+fprintf('=== REKAP DATA RRT* UNTUK TA ===\n');
+fprintf('  Total Waktu Komputasi : %.4f detik\n', total_waktu_RRT);
+fprintf('  Panjang Lintasan Raw  : %.2f meter\n', total_panjang_raw);
+fprintf('  Jumlah Waypoint Raw   : %d titik\n', total_waypoint_raw);
+fprintf('=================================\n');
+%% =================== G2CBS SMOOTHING (REVISED) ===================
+fprintf('=== G2CBS Smoothing (Continuous Mode) ===\n');
 
-smoothPath2 = g2cbsSmooth(rawPath2, 120);
-smoothPath2 = repairPathObstacles(smoothPath2, obstacles, safetyMargin);
+% 1. Gabungkan dulu SEMUA titik raw dari RRT* menjadi satu array
+% rawPath1: Start -> WP, rawPath2: WP -> Goal
+rawPathCombined = [rawPath1; rawPath2(2:end,:)]; 
 
-% Gabung: titik junction = waypoint
-fullPath      = [smoothPath1; smoothPath2(2:end,:)];
-smoothFull    = fullPath;
-wpJunctionIdx = size(smoothPath1, 1);
-seg1Len       = wpJunctionIdx;
-nWP           = size(fullPath, 1);
+% 2. Lakukan Smoothing SEKALI JALAN pada jalur gabungan
+% Ini menjamin di titik WP, transisinya mulus (G2 Continuity)
+nTotalPoints = 400; % Total titik sepanjang jalur
+smoothFull = g2cbsSmooth(rawPathCombined, nTotalPoints);
 
-wpSpacing = sum(sqrt(sum(diff(fullPath).^2,2))) / (nWP-1);
-fprintf('  G2CBS: %d pts, spacing=%.3f m, WP junction idx=%d\n', nWP, wpSpacing, seg1Len);
+% 3. Perbaikan halangan (Obstacle Repair)
+fullPath = repairPathObstacles(smoothFull, obstacles, safetyMargin);
 
-if seg1Len > 1 && seg1Len < nWP
-    h1 = atan2(fullPath(seg1Len,2)-fullPath(seg1Len-1,2), fullPath(seg1Len,1)-fullPath(seg1Len-1,1));
-    h2 = atan2(fullPath(seg1Len+1,2)-fullPath(seg1Len,2), fullPath(seg1Len+1,1)-fullPath(seg1Len,1));
-    fprintf('  Heading jump at WP: %.1f deg\n', abs(rad2deg(wrapToPi(h2-h1))));
-end
+% Cari index WP di dalam path baru untuk keperluan log/indikator
+[~, wpJunctionIdx] = min(sqrt(sum((fullPath - waypoint).^2, 2)));
 
+nWP = size(fullPath, 1);
 pathCurv = computePathCurvature(fullPath);
-
+% --- MEMECAH KEMBALI JALUR UNTUK KEPERLUAN PLOT & ANIMASI ---
+seg1Len = wpJunctionIdx;
+smoothPath1 = fullPath(1:wpJunctionIdx, :);
+smoothPath2 = fullPath(wpJunctionIdx:end, :);
 %% =================== CONTROLLER PARAMETERS ======================
 % KEMBALI KE STANDAR MURNI: Delta = 8.0 m (Rasio 1.95 terhadap R_turn 4.1m)
-ILOS.Delta    = 3.0;    % JANGAN DIUBAH (Wajib konstan)
+ILOS.Delta    = 3.5;    % diperbesar agar pandangan kapal jauh ke depan
 ILOS.gamma    = 0.5;   
 ILOS.beta_hat = 0;
-ILOS.kappa    = 0.;
-
+ILOS.kappa    = 1.0;
 WP_RADIUS  = 1.5;   % Toleransi masuk area Waypoint
 WP_PAUSE   = 3.5;   % Kapal berhenti di Waypoint
-GOAL_TOL   = 1.0;   % Toleransi akhir (Wajib agak besar agar tidak muter)
+GOAL_TOL   = 1.5;   % Toleransi akhir (Wajib agak besar agar tidak muter)
 WP_ACCEPT  = 0.5;   
-
-PD.Kp = 15.0;
-PD.Kd = 7.0;
-
+PD.Kp = 2.5;
+PD.Kd = 1.2;
 U0_saved = USV.U0; % 1.5 m/s konstan
 fprintf('  ILOS Delta=%.1fm (R=4.1m, ratio=%.2f) | Kp=%.1f Kd=%.1f\n', ...
     ILOS.Delta, ILOS.Delta/4.1, PD.Kp, PD.Kd);
-
 %% =================== SIMULATION SETUP ===========================
 dt   = 0.05;
 Tsim = 200;
 N    = round(Tsim/dt);
-
 % Inisialisasi posisi mata kapal (wpIdx)
 wpIdx = 2;
 for ii = 2:min(20, nWP)
@@ -143,7 +146,6 @@ end
 psi0 = atan2(fullPath(wpIdx,2) - start(2), fullPath(wpIdx,1) - start(1));
 state      = zeros(N+1, 8);
 state(1,:) = [start(1), start(2), psi0, 0, USV.U0, 0, 0, 0];
-
 delta      = zeros(N+1, 1);
 psi_e_prev = 0;
 dpsi_e     = 0;
@@ -162,9 +164,7 @@ log.delta   = zeros(N+1,1);
 log.pathSeg = ones(N+1,1);
 log.u(1)    = USV.U0;
 N_end       = N;
-
 fprintf('=== Simulation Start ===\n');
-
 %% =================== MAIN SIMULATION LOOP =======================
 for k = 1:N
     t   = (k-1)*dt;
@@ -174,7 +174,7 @@ for k = 1:N
     
     %% 1. GOAL CHECK
     dist_goal = norm([xk - goal(1), yk - goal(2)]);
-    if dist_goal < 0.8 
+    if dist_goal < 1.5 
         fprintf('  >>> GOAL REACHED t=%.1fs\n', t);
         state(k,5:8) = 0; 
         break;
@@ -190,43 +190,39 @@ for k = 1:N
     end
     pausing = wpReached && (t < wpPauseEnd);
     
-    %% 3. ADVANCE WAYPOINT INDEX 
-    dist_to_wp = norm([xk - waypoint(1), yk - waypoint(2)]);
-    
-    % Antisipasi Tikungan: Curi start jika dekat WP
-    if ~wpReached && dist_to_wp < 3.5 
-        targetIdx = min(seg1Len + 15, nWP); 
-    else
-        searchRange = wpIdx : min(wpIdx + 20, nWP);
-        dists = sqrt((fullPath(searchRange,1) - xk).^2 + (fullPath(searchRange,2) - yk).^2);
-        [~, localIdx] = min(dists);
-        wpIdx = wpIdx + localIdx - 1;
-        targetIdx = min(wpIdx + 5, nWP); 
-    end
-    
-    log.pathSeg(k) = 1 + (wpIdx > seg1Len);
-    
-    %% 4. ILOS GUIDANCE (Tight Turns)
-    p1 = fullPath(max(1, targetIdx-5), :);
-    p2 = fullPath(targetIdx, :);
+  %% 3. ADVANCE WAYPOINT INDEX (DIPERBAIKI)
+% Cari titik terdekat di seluruh jalur (fullPath)
+searchRange = max(1, wpIdx-5) : min(wpIdx + 15, nWP);
+dists = sqrt((fullPath(searchRange,1) - xk).^2 + (fullPath(searchRange,2) - yk).^2);
+[~, localIdx] = min(dists);
+wpIdx = searchRange(localIdx);
+
+% --- LOGIKA ANTISIPASI (LOOK-AHEAD NODES) ---
+% Kita ingin melihat 5-8 node ke depan tanpa terhalang sekat Waypoint
+% agar transisi smooth (tidak patah di WP)
+lookAheadNodes = 27; 
+targetIdx = min(wpIdx + lookAheadNodes, nWP);
+log.pathSeg(k) = 1 + (wpIdx > seg1Len);   
+   %% 4. ILOS GUIDANCE (Standard & Precise)
+    p1 = fullPath(wpIdx,:);
+    p2 = fullPath(targetIdx,:);
     alpha = atan2(p2(2)-p1(2), p2(1)-p1(1));
+    
     ye = -sin(alpha)*(xk - p1(1)) + cos(alpha)*(yk - p1(2));
     cte = ye;
-
-    % Delta Adaptif agar tarikan lebih rapat
-    Delta_tight = max(1.8, 4.0 * exp(-0.5 * abs(ye))); 
     
+    % HAPUS baris Delta_fixed = 2.0; 
+    % Langsung gunakan ILOS.Delta dari parameter atas (3.5)
     ILOS.beta_hat = ILOS.beta_hat + dt * ILOS.kappa * ...
-        (ye / sqrt(Delta_tight^2 + (ye + ILOS.gamma*ILOS.beta_hat)^2));
+        (ye / sqrt(ILOS.Delta^2 + (ye + ILOS.gamma*ILOS.beta_hat)^2));
         
-    psi_d = wrapToPi(alpha - atan2(ye + ILOS.gamma*ILOS.beta_hat, Delta_tight));
-
+    psi_d = wrapToPi(alpha - atan2(ye + ILOS.gamma*ILOS.beta_hat, ILOS.Delta));
     %% 5. PD CONTROLLER
     psi_e = wrapToPi(psi_d - psi);
     
     raw_dpsi = (psi_e - psi_e_prev) / dt;
     raw_dpsi = max(-2.0, min(2.0, raw_dpsi)); 
-    dpsi_e   = 0.6 * raw_dpsi + 0.4 * dpsi_e;
+    dpsi_e   = 0.3 * raw_dpsi + 0.7 * dpsi_e;
     psi_e_prev = psi_e;
     
     delta_c = PD.Kp * psi_e + PD.Kd * dpsi_e;
@@ -246,20 +242,23 @@ for k = 1:N
     delta(k+1) = delta(k) + dDelta * dt;
     delta(k+1) = max(-USV.deltaMax, min(USV.deltaMax, delta(k+1)));
     
-    %% 6. KECEPATAN (Slow-In, Fast-Out)
-    if pausing
-        USV.U0 = 0.0;
+   %% 6. KECEPATAN ADAPTIF (ANTISIPASI TIKUNGAN)
+% Hitung kelengkungan jalur di depan (targetIdx)
+futureCurvature = abs(pathCurv(targetIdx));
+
+if pausing
+    USV.U0 = 0.0;
+else
+    % Jika di depan ada tikungan tajam (Curvature tinggi), kurangi kecepatan dari sekarang
+    if futureCurvature > 0.1 || abs(psi_e) > deg2rad(20)
+        USV.U0 = 0.7; % Pelan untuk manuver
     else
-        % Pelan saat mendekati WP atau saat melenceng jauh
-        if dist_to_wp < 3.0 && ~wpReached
-            USV.U0 = 0.7; 
-        elseif abs(ye) > 0.6
-            USV.U0 = 0.8;
-        else
-            USV.U0 = 1.5; 
-        end
+        USV.U0 = 1.5; % Speed normal
     end
-    USV.T0_active = max(3.0, USV.T0 * (USV.U0 / 1.5));
+end
+    
+    % Batasi penurunan thrust agar kapal tidak mati mesin total saat mengerem
+    USV.T0_active = max(1.5, USV.T0 * (USV.U0 / 1.5));
     
     %% 7. DYNAMICS
     state(k+1,:) = usv4DOF(state(k,:), delta(k+1), USV, dt);
@@ -277,29 +276,25 @@ for k = 1:N
     log.delta(k+1) = delta(k+1);
     
     N_end = k+1;
-end % <--- HANYA ADA SATU END DI SINI UNTUK LOOP FOR
+end 
  
 Np     = N_end;
 t_plot = log.t(1:Np);
 segs   = log.pathSeg(1:Np);
 fprintf('  Sim done. T=%.1f s  final=(%.2f, %.2f)\n', ...
     t_plot(end), state(Np,1), state(Np,2));
-
 %% =================== SINGLE TABBED FIGURE =======================
 c1=[0.00 0.45 0.74]; c2=[0.85 0.33 0.10];
 c3=[0.47 0.67 0.19]; c4=[0.49 0.18 0.56];
 cObs=[0.8 0.1 0.1];
 theta_c = linspace(0,2*pi,60);
-
 hFig = figure('Name','USV 4-DOF | RRT* + G2CBS + ILOS + PD',...
     'Position',[20 20 1350 830]);
 tg = uitabgroup(hFig);
-
 %% ======== TAB 1: Path Planning ========
 tab1 = uitab(tg,'Title',' Path Planning ');
 ax1L = axes('Parent',tab1,'Position',[0.04 0.10 0.53 0.82]);
 ax1R = axes('Parent',tab1,'Position',[0.61 0.10 0.36 0.82]);
-
 axes(ax1L); hold on; grid on; axis equal;
 xlim([0 xMax]); ylim([0 yMax]);
 xlabel('X [m]','FontSize',11); ylabel('Y [m]','FontSize',11);
@@ -327,7 +322,6 @@ text(start(1)+.5,start(2)+.7,'Start','FontSize',10,'FontWeight','bold','Color','
 text(waypoint(1)+.5,waypoint(2)+.7,'WP','FontSize',10,'FontWeight','bold','Color','b');
 text(goal(1)-3,goal(2)+.7,'Goal','FontSize',10,'FontWeight','bold','Color','r');
 legend('Location','northwest','FontSize',9); set(ax1L,'FontSize',10);
-
 axes(ax1R); hold on; grid on;
 arcS=computeArcLength(fullPath); arcSnorm=arcS/arcS(end);
 arcR=computeArcLength(rawPathAll); arcRnorm=arcR/arcR(end);
@@ -345,7 +339,6 @@ title('Curvature & Heading Profile','FontSize',11,'FontWeight','bold');
 legend('Location','best','FontSize',9);
 xline(arcSnorm(seg1Len),'k:','WP','LabelVerticalAlignment','bottom','FontSize',9);
 set(ax1R,'FontSize',10);
-
 %% ======== TAB 2: Trajectory ========
 tab2 = uitab(tg,'Title',' Trajectory ');
 ax2  = axes('Parent',tab2,'Position',[0.05 0.08 0.90 0.86]);
@@ -381,7 +374,6 @@ plot(ax2,start(1),start(2),'^','MarkerSize',13,'MarkerFaceColor','g','Color','g'
 plot(ax2,waypoint(1),waypoint(2),'s','MarkerSize',11,'MarkerFaceColor','b','Color','b','DisplayName','WP');
 plot(ax2,goal(1),goal(2),'p','MarkerSize',16,'MarkerFaceColor','r','Color','r','DisplayName','Goal');
 legend(ax2,'Location','northwest','FontSize',10); set(ax2,'FontSize',11);
-
 %% ======== TAB 3: State Variables ========
 tab3 = uitab(tg,'Title',' States ');
 sTit = {'Heading \psi [deg]','Heading Error [deg]','Cross-Track Error [m]',...
@@ -409,10 +401,8 @@ for i=1:9
     grid(axS,'on'); set(axS,'FontSize',9);
 end
 sgtitle('USV 4-DOF State Variables','FontSize',13,'FontWeight','bold');
-
 %% ======== TAB 4: Performance ========
 tab4 = uitab(tg,'Title',' Performance ');
-
 ax41=subplot(2,2,1,'Parent',tab4);
 spd=sqrt(log.u(1:Np).^2+log.v(1:Np).^2);
 plot(ax41,t_plot,spd,'-','Color',c1,'LineWidth',2); hold(ax41,'on');
@@ -421,14 +411,12 @@ title(ax41,'Total Speed','FontWeight','bold');
 xlabel(ax41,'t [s]'); ylabel(ax41,'[m/s]');
 legend(ax41,'|V|','U_{des}=1.5m/s','FontSize',9,'Location','best');
 grid(ax41,'on'); ylim(ax41,[0 2.5]);
-
 ax42=subplot(2,2,2,'Parent',tab4);
 dGoal=sqrt((state(1:Np,1)-goal(1)).^2+(state(1:Np,2)-goal(2)).^2);
 plot(ax42,t_plot,dGoal,'-','Color',c2,'LineWidth',2);
 yline(ax42,GOAL_TOL,'k--','Tol','FontSize',9,'LineWidth',1.2);
 title(ax42,'Distance to Goal','FontWeight','bold');
 xlabel(ax42,'t [s]'); ylabel(ax42,'[m]'); grid(ax42,'on');
-
 ax43=subplot(2,2,3,'Parent',tab4);
 cteA=abs(log.cte(1:Np));
 cteR=zeros(Np,1);
@@ -438,7 +426,6 @@ plot(ax43,t_plot,cteR,'-','Color',c3,'LineWidth',2.5);
 title(ax43,'Cross-Track Error & RMS','FontWeight','bold');
 xlabel(ax43,'t [s]'); ylabel(ax43,'[m]');
 legend(ax43,'|CTE|','RMS CTE','FontSize',9,'Location','best'); grid(ax43,'on');
-
 ax44=subplot(2,2,4,'Parent',tab4);
 yyaxis(ax44,'left');
 if ~isempty(idx1)
@@ -455,10 +442,8 @@ plot(ax44,t_plot,rad2deg(log.delta(1:Np)),'-','Color',c4,'LineWidth',1.5);
 ylabel(ax44,'\delta [deg]');
 title(ax44,'Segment & Rudder','FontWeight','bold');
 xlabel(ax44,'t [s]'); grid(ax44,'on'); set(ax44,'FontSize',9);
-
 %% ======== TAB 5: G2CBS Analysis ========
 tab5 = uitab(tg,'Title',' G2CBS Analysis ');
-
 ax51=subplot(2,3,1,'Parent',tab5);
 kapR2=computePathCurvature(rawPathAll);
 plot(ax51,linspace(0,1,length(kapR2)),kapR2,'--','Color',c2,'LineWidth',1.5,'DisplayName','RRT* Raw');
@@ -466,7 +451,6 @@ hold(ax51,'on');
 plot(ax51,linspace(0,1,length(pathCurv)),pathCurv,'-','Color',c1,'LineWidth',2.2,'DisplayName','G2CBS');
 xlabel(ax51,'Norm. arc length'); ylabel(ax51,'\kappa [1/m]');
 title(ax51,'Curvature \kappa','FontWeight','bold'); grid(ax51,'on'); legend(ax51,'FontSize',9);
-
 ax52=subplot(2,3,2,'Parent',tab5);
 psiR2=computePathHeading(rawPathAll); psiS2=computePathHeading(fullPath);
 plot(ax52,linspace(0,1,length(psiR2)),rad2deg(psiR2),'--','Color',c2,'LineWidth',1.5,'DisplayName','RRT* Raw');
@@ -475,7 +459,6 @@ plot(ax52,linspace(0,1,length(psiS2)),rad2deg(psiS2),'-','Color',c1,'LineWidth',
 xline(ax52,seg1Len/nWP,'k:','WP','FontSize',9,'LabelVerticalAlignment','bottom');
 xlabel(ax52,'Norm. arc length'); ylabel(ax52,'\psi_d [deg]');
 title(ax52,'Path Heading','FontWeight','bold'); grid(ax52,'on'); legend(ax52,'FontSize',9);
-
 ax53=subplot(2,3,3,'Parent',tab5);
 dkR=abs(diff(kapR2)); dkS=abs(diff(pathCurv));
 plot(ax53,linspace(0,1,length(dkR)),dkR,'--','Color',c2,'LineWidth',1.5,'DisplayName','Raw');
@@ -483,7 +466,6 @@ hold(ax53,'on');
 plot(ax53,linspace(0,1,length(dkS)),dkS,'-','Color',c1,'LineWidth',2.2,'DisplayName','G2CBS');
 xlabel(ax53,'Norm. arc length'); ylabel(ax53,'|d\kappa/ds|');
 title(ax53,'Curvature Rate of Change','FontWeight','bold'); grid(ax53,'on'); legend(ax53,'FontSize',9);
-
 ax54=subplot(2,3,4,'Parent',tab5); hold(ax54,'on'); grid(ax54,'on'); axis(ax54,'equal');
 for i=1:size(obstacles,1)
     xc=obstacles(i,1); yc=obstacles(i,2);
@@ -495,7 +477,6 @@ plot(ax54,rawPath1(:,1),rawPath1(:,2),'--x','Color',c2,'LineWidth',1.3,'MarkerSi
 plot(ax54,smoothPath1(:,1),smoothPath1(:,2),'-','Color',c1,'LineWidth',2.5,'DisplayName','G2CBS Seg.1');
 xlabel(ax54,'X [m]'); ylabel(ax54,'Y [m]');
 title(ax54,'Segment 1 Detail','FontWeight','bold'); legend(ax54,'FontSize',9);
-
 ax55=subplot(2,3,5,'Parent',tab5); hold(ax55,'on'); grid(ax55,'on'); axis(ax55,'equal');
 for i=1:size(obstacles,1)
     xc=obstacles(i,1); yc=obstacles(i,2);
@@ -507,7 +488,6 @@ plot(ax55,rawPath2(:,1),rawPath2(:,2),'--x','Color',c2,'LineWidth',1.3,'MarkerSi
 plot(ax55,smoothPath2(:,1),smoothPath2(:,2),'-','Color',c1,'LineWidth',2.5,'DisplayName','G2CBS Seg.2');
 xlabel(ax55,'X [m]'); ylabel(ax55,'Y [m]');
 title(ax55,'Segment 2 Detail','FontWeight','bold'); legend(ax55,'FontSize',9);
-
 ax56=subplot(2,3,6,'Parent',tab5); axis(ax56,'off');
 lenRaw=sum(sqrt(sum(diff(rawPathAll).^2,2)));
 lenSmo=sum(sqrt(sum(diff(fullPath).^2,2)));
@@ -527,21 +507,17 @@ uitable('Parent',tab5,'Data',stats(2:end,:),'ColumnName',stats(1,:),...
     'FontSize',9,'ColumnWidth',{120,80,80});
 text(ax56,.5,.88,'G2CBS Stats','HorizontalAlignment','center',...
     'FontSize',11,'FontWeight','bold','Units','normalized');
-
 %% ======== TAB 6: Animation ========
 tab6 = uitab(tg,'Title',' Animation ');
 fprintf('=== Running Animation ===\n');
 runAnimation(tab6,state,fullPath,rawPathAll,smoothPath1,smoothPath2,...
     obstacles,USV,log,N_end,dt,xMax,yMax,displayMargin,...
     goal,start,waypoint,ILOS,c1,c2,theta_c,U0_saved);
-
 tg.SelectedTab = tab6;
 fprintf('=== All done ===\n');
-
 %% ================================================================
 %  LOCAL FUNCTIONS
 %% ================================================================
-
 function path = repairPathObstacles(path, obs, margin)
     nObs = size(obs,1);
     for iter = 1:30
@@ -564,7 +540,6 @@ function path = repairPathObstacles(path, obs, margin)
         if ~anyFixed, break; end
     end
 end
-
 function path = rrtStar(startPt,goalPt,obs,mapSz,rrt,margin)
     xMax=mapSz(2); yMax=mapSz(1);
     nodes=zeros(rrt.maxIter+2,2); parent=zeros(rrt.maxIter+2,1);
@@ -604,7 +579,6 @@ function path = rrtStar(startPt,goalPt,obs,mapSz,rrt,margin)
     while idx~=1, path=[nodes(idx,:);path]; idx=parent(idx); end
     path=[startPt;path(2:end,:)];
 end
-
 function f=isCF(p1,p2,obs,margin)
     f=true;
     for s=linspace(0,1,20)
@@ -616,17 +590,14 @@ function f=isCF(p1,p2,obs,margin)
         end
     end
 end
-
 function b=inBounds(pt,xMax,yMax)
     b=pt(1)>=0&&pt(1)<=xMax&&pt(2)>=0&&pt(2)<=yMax;
 end
-
 function pathS = g2cbsSmooth(waypts, nPts)
     % 1. Cek apakah waypts kosong
     if isempty(waypts)
         pathS = []; return;
     end
-
     % 2. Hilangkan titik yang duplikat atau terlalu dekat
     minD = 1e-4; 
     keep = true(size(waypts, 1), 1);
@@ -637,7 +608,6 @@ function pathS = g2cbsSmooth(waypts, nPts)
     end
     waypts = waypts(keep, :); 
     n = size(waypts, 1);
-
     % 3. Penanganan jika titik <= 2 (Pemicu Error Sebelumnya)
     if n < 3
         if n == 1
@@ -654,7 +624,6 @@ function pathS = g2cbsSmooth(waypts, nPts)
         pathS(end,:) = waypts(end,:); 
         return;
     end
-
     % 4. Prosedur Normal (Spline Smoothing)
     d = sqrt(sum(diff(waypts).^2, 2)); 
     d(d < 1e-10) = 1e-10;
@@ -662,13 +631,13 @@ function pathS = g2cbsSmooth(waypts, nPts)
     t = t / t(end);
     
     % Pastikan t strictly increasing
+    % Pastikan t strictly increasing
     for i = 2:length(t)
         if t(i) <= t(i-1), t(i) = t(i-1) + 1e-9; end
     end
     t = t / t(end);
-
-    ppX = spline(t, waypts(:,1)); 
-    ppY = spline(t, waypts(:,2));
+    ppX = pchip(t, waypts(:,1));  % <--- BERUBAH JADI PCHIP
+    ppY = pchip(t, waypts(:,2));  % <--- BERUBAH JADI PCHIP
     
     tD = linspace(0, 1, nPts * 10);
     xD = ppval(ppX, tD); 
@@ -686,7 +655,6 @@ function pathS = g2cbsSmooth(waypts, nPts)
     xS(end) = waypts(end,1); yS(end) = waypts(end,2);
     pathS = [xS(:), yS(:)];
 end
-
 function ok=isPathClear(pts,obs,margin)
     ok=true;
     for k=1:size(pts,1)
@@ -695,11 +663,9 @@ function ok=isPathClear(pts,obs,margin)
         end
     end
 end
-
 function s=computeArcLength(path)
     d=sqrt(sum(diff(path).^2,2)); s=[0;cumsum(d)];
 end
-
 function kappa=computePathCurvature(path)
     n=size(path,1);
     if n<3, kappa=zeros(n,1); return; end
@@ -720,12 +686,10 @@ function kappa=computePathCurvature(path)
     den=(xp.^2+yp.^2).^1.5; den(den<1e-9)=1e-9;
     kappa=(xp.*ypp-yp.*xpp)./den;
 end
-
 function psi=computePathHeading(path)
     dx=diff(path(:,1)); dy=diff(path(:,2));
     psi=[atan2(dy,dx); atan2(dy(end),dx(end))];
 end
-
 function [psi_d, ILOS, ey] = ilosGuidance(x, y, psi, v, u, wpPrev, wpNext, ILOS, dt) %#ok<INUSD>
 % Standard ILOS — Fossen 2002, Lekkas 2014
 % STABILITAS: Delta >= 2*R_turn = 8.2m
@@ -733,25 +697,19 @@ function [psi_d, ILOS, ey] = ilosGuidance(x, y, psi, v, u, wpPrev, wpNext, ILOS,
     dx    = wpNext(1) - wpPrev(1);
     dy    = wpNext(2) - wpPrev(2);
     alpha = atan2(dy, dx);
-
     ye = -sin(alpha)*(x - wpPrev(1)) + cos(alpha)*(y - wpPrev(2));
     ey = ye;
-
     if abs(ye) > 4.0
         ILOS.beta_hat = 0;
     end
-
     ILOS.beta_hat = ILOS.beta_hat + dt * ILOS.kappa * ...
         (ye / sqrt(ILOS.Delta^2 + (ye + ILOS.gamma*ILOS.beta_hat)^2));
-
     psi_d = wrapToPi(alpha - atan2(ye + ILOS.gamma*ILOS.beta_hat, ILOS.Delta));
-
     psi_d_err = wrapToPi(psi_d - alpha);
     if abs(psi_d_err) > deg2rad(85)
         psi_d = wrapToPi(alpha + sign(psi_d_err)*deg2rad(85));
     end
 end
-
 function sNew=usv4DOF(s,delta,USV,dt)
     k1=shipEOM(s,          delta,USV);
     k2=shipEOM(s+.5*dt*k1, delta,USV);
@@ -761,7 +719,6 @@ function sNew=usv4DOF(s,delta,USV,dt)
     sNew(3)=wrapToPi(sNew(3));
     sNew(4)=wrapToPi(sNew(4));
 end
-
 function ds = shipEOM(s, delta, USV)
 % 4-DOF USV: [x, y, psi, phi, u, v, r, p]
     psi = s(3); phi = s(4);
@@ -781,10 +738,9 @@ function ds = shipEOM(s, delta, USV)
     end
     
     % Thrust: P-controller untuk menjaga target kecepatan (U0)
-    T = nom_T + 5.0 * (USV.U0 - u); % 5.0 adalah gain tambahan untuk respon cepat
+    T = nom_T + 2.5 * (USV.U0 - u); % 5.0 adalah gain tambahan untuk respon cepat
     T = max(0, T); % Mencegah thrust bernilai negatif berlebih jika tidak pakai rem
     % ==============================================================
-
     Ur   = max(sqrt(u^2 + v^2), 0.05);
     FY_r = USV.Ky_r * Ur^2 * sin(delta);
     FN_r = USV.Kn_r * Ur^2 * sin(delta);
@@ -805,11 +761,9 @@ function ds = shipEOM(s, delta, USV)
     
     ds = [x_dot, y_dot, r, p, u_dot, v_dot, r_dot, p_dot];
 end
-
 function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
     obstacles,USV,log,N_end,dt,xMax,yMax,margin,...
     goal,startPt,wayptPt,ILOS,c1,c2,theta_c,U0_saved)
-
     axA=axes('Parent',tab,'Position',[0.03 0.17 0.61 0.79]);
     hold(axA,'on'); grid(axA,'on'); axis(axA,'equal');
     axA.Color=[0.07 0.07 0.13]; axA.GridColor=[.4 .4 .5]; axA.GridAlpha=.3;
@@ -819,7 +773,6 @@ function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
     ylabel(axA,'Y [m]','Color',[.9 .9 .9],'FontSize',11);
     title(axA,'USV  RRT* + G2CBS + ILOS + PD',...
         'Color',[.95 .95 1],'FontSize',12,'FontWeight','bold');
-
     obsC={[1 .3 .3],[1 .5 .2],[1 .7 .2],[.8 .3 1],[.3 .8 1],[.3 1 .5]};
     for i=1:size(obstacles,1)
         xc=obstacles(i,1); yc=obstacles(i,2); rc=obstacles(i,3)+margin;
@@ -840,9 +793,7 @@ function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
     text(axA,startPt(1)+.3,startPt(2)+.8,'START','Color',[.3 1 .4],'FontSize',9,'FontWeight','bold');
     text(axA,wayptPt(1)+.3,wayptPt(2)+.8,'WP','Color',[.4 .7 1],'FontSize',9,'FontWeight','bold');
     text(axA,goal(1)-2.8,goal(2)+.8,'GOAL','Color',[1 .5 .5],'FontSize',9,'FontWeight','bold');
-
     hTrail=plot(axA,NaN,NaN,'-','Color',[.4 .85 1],'LineWidth',2.2);
-
     Ls=1.5; Bs=0.5;
     hullX=[.5*Ls,.28*Ls,-.5*Ls,-.5*Ls,.28*Ls];
     hullY=[0,.5*Bs,.4*Bs,-.4*Bs,-.5*Bs];
@@ -853,7 +804,6 @@ function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
     hBow  =plot(axA,NaN,NaN,'->','Color',[1 1 0],'MarkerSize',8,'LineWidth',2);
     hInfo =text(axA,.3,yMax*.97,'','Color','w','FontSize',9,...
         'VerticalAlignment','top','BackgroundColor',[0 0 0 .55]);
-
     bg=[.06 .06 .12];
     axC=axes('Parent',tab,'Position',[0.66 0.68 0.31 0.25]);
     axC.Color=bg; axC.XColor=[.8 .8 .8]; axC.YColor=[.8 .8 .8]; axC.GridColor=[.4 .4 .5];
@@ -863,7 +813,6 @@ function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
     title(axC,'Cross-Track Error','FontSize',9,'Color',[.9 .9 1],'FontWeight','bold');
     hCTE=plot(axC,NaN,NaN,'-','Color',[.3 .8 1],'LineWidth',1.5);
     yline(axC,0,'--','Color',[.6 .6 .6],'LineWidth',1);
-
     axSp=axes('Parent',tab,'Position',[0.66 0.40 0.31 0.24]);
     axSp.Color=bg; axSp.XColor=[.8 .8 .8]; axSp.YColor=[.8 .8 .8]; axSp.GridColor=[.4 .4 .5];
     grid(axSp,'on'); hold(axSp,'on');
@@ -874,7 +823,6 @@ function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
     hU  =plot(axSp,NaN,NaN,'--','Color',[.4 1 .4],'LineWidth',1.2,'DisplayName','u');
     yline(axSp,U0_saved,'--','Color',[1 .4 .4],'LineWidth',1.2,'DisplayName','1.5 m/s');
     legend(axSp,'FontSize',7,'TextColor','w','Color',[0 0 0 0]);
-
     axDl=axes('Parent',tab,'Position',[0.66 0.12 0.31 0.24]);
     axDl.Color=bg; axDl.XColor=[.8 .8 .8]; axDl.YColor=[.8 .8 .8]; axDl.GridColor=[.4 .4 .5];
     grid(axDl,'on'); hold(axDl,'on');
@@ -884,29 +832,23 @@ function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
     hDel=plot(axDl,NaN,NaN,'-','Color',[1 .5 .8],'LineWidth',1.5);
     yline(axDl, rad2deg(USV.deltaMax),'--','Color',[1 .3 .3],'LineWidth',1);
     yline(axDl,-rad2deg(USV.deltaMax),'--','Color',[1 .3 .3],'LineWidth',1);
-
     annotation(tab,'textbox',[0.66 0.91 0.31 0.07],...
         'String','RRT* → G2CBS → ILOS → PD',...
         'FontSize',9,'Color',[.7 1 .7],...
         'BackgroundColor',[0 0 0 .6],'EdgeColor',[.4 .6 .4],...
         'HorizontalAlignment','center');
-
     skip=max(1,round(0.08/dt));
-
     for k=1:skip:N_end
         if ~ishandle(tab), break; end
         xk=state(k,1); yk=state(k,2); psik=state(k,3); phik=state(k,4);
         uk=state(k,5); vk=state(k,6); delk=log.delta(k); tk=(k-1)*dt;
-
         set(hTrail,'XData',state(1:k,1),'YData',state(1:k,2));
-
         R=[cos(psik) -sin(psik);sin(psik) cos(psik)];
         hw=R*[hullX;hullY]; hsw=R*[houseX;houseY];
         set(hShip, 'XData',xk+hw(1,:), 'YData',yk+hw(2,:));
         set(hHouse,'XData',xk+hsw(1,:),'YData',yk+hsw(2,:));
         set(hBow,  'XData',[xk,xk+.5*Ls*cos(psik)],...
                    'YData',[yk,yk+.5*Ls*sin(psik)]);
-
         kW=max(1,k-round(60/dt)); tW=(kW-1:k-1)*dt;
         set(hCTE,'XData',tW,'YData',log.cte(kW:k));
         xlim(axC,[tW(1) max(tW(end)+.1,tW(1)+5)]);
@@ -916,16 +858,13 @@ function runAnimation(tab,state,fullPath,rawAll,sP1,sP2,...
         xlim(axSp,[tW(1) max(tW(end)+.1,tW(1)+5)]);
         set(hDel,'XData',tW,'YData',rad2deg(log.delta(kW:k)));
         xlim(axDl,[tW(1) max(tW(end)+.1,tW(1)+5)]);
-
         spd=sqrt(uk^2+vk^2);
         sl='Seg.1'; if log.pathSeg(k)==2, sl='Seg.2 G2CBS'; end
         set(hInfo,'String',sprintf(...
             't = %.1f s\nSpeed = %.2f m/s\n\\delta = %.1f°\n\\psi = %.1f°\n\\phi = %.2f°\nCTE = %.2f m\n[%s]',...
             tk,spd,rad2deg(delk),rad2deg(psik),rad2deg(phik),log.cte(k),sl));
-
         drawnow limitrate; pause(0.001);
     end
-
     plot(axA,state(1:N_end,1),state(1:N_end,2),'-','Color',[.4 .9 1],...
         'LineWidth',2.5,'DisplayName','USV Trajectory');
     legend(axA,'Location','northwest','FontSize',9,...
